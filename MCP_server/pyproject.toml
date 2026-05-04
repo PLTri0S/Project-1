@@ -1,0 +1,11 @@
+[project]
+name = "mcp-server"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastmcp>=3.2.4",
+    "passlib>=1.7.4",
+    "psutil>=7.2.2",
+]
