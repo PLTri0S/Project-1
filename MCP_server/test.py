@@ -15,12 +15,15 @@ PROJECT_ROOT = BASE_DIR.parent
 OPENTOFU_DIR = PROJECT_ROOT / "OpenTofu"
 GEMINI_FILE = PROJECT_ROOT / "GEMINI.md"
 KUBESPRAY_DIR = PROJECT_ROOT / "kubespray"
-def _run_command(args: list, path = None) -> subprocess.CompletedProcess:
+
+
+def _run_command(args: list, path = None, ENV= None) -> subprocess.CompletedProcess:
     return subprocess.run(
     args,
     cwd=path,
-    capture_output=True,
-    text=True,
+    #capture_output=True,
+    #text=True,
+    env=ENV,
     check=True,
     )
 
@@ -162,7 +165,7 @@ def provision_vms(
         return output.stdout
             
             
-#print(provision_vms(disk_size=12, worker_nodes=1, worker_ram=2, master_ram=2, master_nodes=1, master_vcpu=3))
+#print(provision_vms(disk_size=10, worker_nodes=1, worker_ram=2, master_ram=2, master_nodes=1, master_vcpu=2, worker_vcpu=2))
 
 def destroy_vms(confirm: bool = False) -> str:
     """Destroy OpenTofu-managed VMs if confirmation is provided."""
@@ -170,7 +173,7 @@ def destroy_vms(confirm: bool = False) -> str:
         return "Cancelled"
 
     try:
-        result = _run_command(["tofu", "destroy", "-auto-approve"])
+        result = _run_command(["tofu", "destroy", "-auto-approve"], path=OPENTOFU_DIR)
     except subprocess.CalledProcessError as e:
         return (f"FAIL: {e}\n{e.stderr}")
 
@@ -179,7 +182,7 @@ def destroy_vms(confirm: bool = False) -> str:
 
 
 
-#print(destroy_vms(True))
+print(destroy_vms(True))
 
 def update_vms(
     master_nodes: int = None,
@@ -269,19 +272,19 @@ def update_vms(
         )
     else: 
         try:
-            _run_command(["tofu", "init"])
-            _run_command(["tofu", "plan"])
-            _run_command(["tofu", "apply", "-auto-approve"])
-            output = _run_command(["tofu", "output"])
+            _run_command(["tofu", "init"], path=OPENTOFU_DIR)
+            _run_command(["tofu", "plan"], path=OPENTOFU_DIR)
+            _run_command(["tofu", "apply", "-auto-approve"], path=OPENTOFU_DIR)
+            output = _run_command(["tofu", "output"], path=OPENTOFU_DIR)
         except subprocess.CalledProcessError as e:
             try: 
-                _run_command(["tofu", "apply", "-auto-approve"])
-                output = _run_command(["tofu", "output"])
+                _run_command(["tofu", "apply", "-auto-approve"], path=OPENTOFU_DIR)
+                output = _run_command(["tofu", "output"], path=OPENTOFU_DIR)
             except subprocess.CalledProcessError as e:
                 return (f"FAIL: {e}\n{e.stderr}")
 
         return output.stdout
-#print(update_vms(worker_nodes=1, worker_ram=2, master_ram=2, master_nodes=1, master_vcpu=2))    
+#print(update_vms(worker_ram=2))    
 # hashed_password = "$2b$13$9TUMcvNscgdeLCNlCRrT..zVbAjzVYDtQh0PpaOTlunU7xertbOCa"
 # def verify_access() -> str:
 #     """Always ask for password if user want to manage cluster"""
@@ -294,27 +297,29 @@ def update_vms(
 #         tries += 1
 #     return "Too many failed attempts. Access Denied."
 
-# def destroy_vms():
-#     verify_access()
-#     n = str(input("Are you sure you want to delete all the vms? y/n\n"))
-#     if (n.lower() == "y"):
-#         try:
-#             destroy = subprocess.run(["tofu", "destroy", "-auto-approve"], cwd=OPENTOFU_DIR, check=True)
-#         except subprocess.CalledProcessError as e:
-#             return e.stderr
-#         return destroy.stdout
-#     else: return "Cancelled"
+def deploy_cluster() -> str:
+    """
+    Create cluster using kubespray.
+    Running playbook required in kubespray environment.
+    """
+    uid_gid = f"{os.getuid()}:{os.getgid()}"
+    KUBESPRAY_VENV = KUBESPRAY_DIR / ".venv"
 
-# print(destroy_vms())
+    env = os.environ.copy()
+    env["VIRTUAL_ENV"] = KUBESPRAY_VENV
+    env["PATH"] = f"{KUBESPRAY_VENV}/bin:{env['PATH']}"
+    env.pop("PYTHONHOME", None)
 
-def create_cluster() -> str:
-    """Create cluster using kubespray"""
     try:
-        _run_command(["ansible-playbook", "-i", "inventory/mycluster/inventory.yaml", "-b", "playbooks/cluster.yml"], path="/home/msi/Vscode/Ansible/My-project/kubespray/.venv")
+        _run_command(["ansible-playbook", "-i", "inventory/mycluster/inventory.yaml", "-b", "cluster.yml"], path=KUBESPRAY_DIR, ENV=env)
+        _run_command(["ansible-playbook", "-i", "inventory/mycluster/inventory.yaml", "-b", "playbooks/cilium_error_fix.yml"], path=KUBESPRAY_DIR, ENV=env)
+        _run_command(["ansible-playbook", "-i", "inventory/mycluster/inventory.yaml", "-b", "playbooks/setup_kubeconfig.yml"], path=KUBESPRAY_DIR, ENV=env)
+
+        # _run_command(["sudo", "chown", uid_gid, "home/msi/.kube/config"])
     except subprocess.CalledProcessError as e:
         return (f"FAIL: {e}\n"
                 f"{e.stdout}\n"
                 f"{e.stderr}"
                 )
     return "Succesfully created cluster."
-print(create_cluster())
+#print(deploy_cluster())

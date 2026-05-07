@@ -14,6 +14,7 @@ mcp = FastMCP(
 BASE_DIR = Path(__file__).resolve().parent
 # Move up 1 folder
 PROJECT_ROOT = BASE_DIR.parent
+GEMINI_FILE  = PROJECT_ROOT
 OPENTOFU_DIR = PROJECT_ROOT / "OpenTofu"
 VAR_FILE = OPENTOFU_DIR / "terraform.tfvars.json"
 KUBESPRAY_DIR = PROJECT_ROOT / "kubespray"
@@ -21,13 +22,14 @@ KUBESPRAY_DIR = PROJECT_ROOT / "kubespray"
 to_KB = 1024**2
 to_B  = 1024**3
 #helper function
-def _run_command(args: list, path = None) -> subprocess.CompletedProcess:
+def _run_command(args: list, path = None, environment = None) -> subprocess.CompletedProcess:
     return subprocess.run(
     args,
     cwd=path,
+    env=environment,
     capture_output=True,
     text=True,
-    check=True,
+    check=True, 
     )
 
 #function to check the machine's specs of the host machine
@@ -46,10 +48,10 @@ def check_machine_specs() -> dict:
         "cpus available": cpus
     }
 
-# @mcp.resource("internal://rules")
-# def read_rules() -> str:
-#     """Read the following GEMINI.md"""
-#     return GEMINI_FILE.read_text(encoding="utf-8")
+@mcp.resource("internal://rules")
+def read_rules() -> str:
+    """Read the following GEMINI.md"""
+    return GEMINI_FILE.read_text(encoding="utf-8")
 
 @mcp.resource("infra://vms-config")
 def vms_config() -> str:
@@ -133,17 +135,17 @@ def provision_vms(
     if required_ram + reserve_ram > check["Ram total"]:
         return (
             f"Insufficient RAM: required {required_ram}GB + reserve {reserve_ram}GB, "
-            f"available {check["Ram available"]}GB. Reduce node counts or increase host memory."
+            f"available {check["Ram available"]}GB. Reduce node counts or memory."
         )
     if required_cpu + reserve_cpu > check["cpus available"]:
         return (
             f"Insufficient cpu cores: required {required_cpu} cores + reserve {reserve_cpu} cores, "
-            f"available {check['cpus available']} cores. Reduce node counts or increase host cpu cores."
+            f"available {check['cpus available']} cores. Reduce node counts or cpu cores."
         )
     if required_disk + reserve_disk > check["Disk available"]:
         return (
             f"Insufficient disk: required {required_disk}GB + reserve {reserve_disk}GB, "
-            f"available {check['Disk available']}GB. Reduce node counts or increase host disk."
+            f"available {check['Disk available']}GB. Reduce node counts or disk."
         )
     
     else: 
@@ -253,12 +255,12 @@ def update_vms(
     if delta_ram + reserve_ram > check["Ram available"]:
         return (
             f"Insufficient RAM: need {delta_ram}GB extra + {reserve_ram}GB reserve, "
-            f"only {check['Ram available']}GB free. Reduce nodes or increase host memory."
+            f"only {check['Ram available']}GB free. Reduce nodes or memory."
         )
     if delta_cpu + reserve_cpu > check["cpus available"]:
         return (
             f"Insufficient CPU: need {delta_cpu} cores extra + {reserve_cpu} reserve, "
-            f"only {check['cpus available']} cores free. Reduce nodes or increase host CPUs."
+            f"only {check['cpus available']} cores free. Reduce nodes or CPUs."
         )
     else: 
         try:
@@ -274,15 +276,6 @@ def update_vms(
                 return (f"FAIL: {e}\n{e.stderr}")
 
         return output.stdout
-
-@mcp.tool()
-def create_cluster() -> str:
-    """Create cluster using kubespray"""
-    try:
-        _run_command(["ansible-playbook", "-i", "inventory/mycluster/inventory.yaml", "-b", "playbooks/cluster.yml"], path=KUBESPRAY_DIR)
-    except subprocess.CalledProcessError as e:
-        return (f"FAIL: {e}\n{e.stderr}")
-    return "Succesfully created cluster."
 
 if __name__ == "__main__":
     mcp.run()

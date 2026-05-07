@@ -1,0 +1,19 @@
+#cloud-config
+chpasswd:
+  list: |
+    root:password
+    ubuntu:123
+  expire: false
+
+# Enable SSH password authentication
+ssh_pwauth: true
+
+# Install and enable SSH server
+packages:
+  - openssh-server
+
+# Optional: Add SSH public key for key-based auth (more secure)
+ssh_authorized_keys:
+  - ${ssh_key}
+# Set timezone
+timezone: UTC

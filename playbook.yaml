@@ -1,0 +1,106 @@
+---
+- name: Install Docker
+  hosts: all
+  become: true
+
+  tasks:
+    - name: Unistall conflicting packages
+      ansible.builtin.apt:
+        name: $(dpkg --get-selections docker.io docker-compose docker-compose-v2 docker-doc podman-docker containerd runc | cut -f1)
+        state: absent
+
+
+    - name: Install curl
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+        update_cache: yes
+
+    - name: Create directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Download docker
+      ansible.builtin.get_url:
+        url:  https://download.docker.com/linux/ubuntu/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: '0644'
+
+    - name: Add Docker sources
+      ansible.builtin.file:
+        path: /etc/apt/sources.list.d
+        state: directory
+        mode: '0755'
+
+    - name: Copy docker.sources
+      ansible.builtin.copy:
+        src: /home/msi/Vscode/Ansible/chapter1/docker.sources
+        dest: /etc/apt/sources.list.d/docker.sources
+
+    - name: Finalize update
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        update_cache: yes
+
+    - name: Web Server
+      community.docker.docker_image:
+        name: pltri/web-server
+        tag: ver-1
+        source: pull
+        state: present                                                                    
+
+    # - name: Disable swap
+    #   command: swapoff -a
+    #   when: ansible_swaptotal_mb > 0
+
+    # - name: ipv4 forward
+    #   ansible.builtin.copy:
+    #     src: /home/msi/Vscode/Ansible/My-project/k8s.conf
+    #     dest: /etc/sysctl.d/k8s.conf
+
+    # - name: containerd config
+    #   ansible.builtin.copy:
+    #     src: /home/msi/Vscode/Ansible/My-project/config.toml
+    #     dest: /etc/containerd/config.toml
+
+    # - name: Install Kubectl
+    #   ansible.builtin.get_url:
+    #     url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+    #     dest: /home/
+
+    # - name: Install sha256
+    #   ansible.builtin.get_url:
+    #     url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+    #     dest: /home/
+
+    
+    # - name: Install Kubernetes binaries
+    #   apt: 
+    #     name: "{{ packages }}"
+    #     state: present
+    #     update_cache: yes
+    #   vars:
+    #     packages:
+    #       - kubelet 
+    #       - kubeadm 
+    #       - kubectl
+
+    # - name: Configure node ip
+    #   lineinfile:
+    #     path: /etc/default/kubelet
+    #     line: KUBELET_EXTRA_ARGS=--node-ip={{ node_ip }}
+
+    # - name: Restart kubelet
+    #   service:
+    #     name: kubelet
+    #     daemon_reload: yes
+    #     state: restarted
+

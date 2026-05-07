@@ -1,0 +1,50 @@
+all:
+  # 1. Define global variables here. Every host will inherit these.
+  vars:
+    ansible_user: ubuntu
+    # ansible_ssh_private_key_file: ~/.ssh/id_ed25519
+    ansible_python_interpreter: /usr/bin/python3
+
+  # 2. Define all hosts and their required Kubespray IP variables
+  hosts:
+%{ for index, ip in master_ips ~}
+    master-${index + 1}:
+      ansible_host: ${ip}
+      ip: ${ip}
+      access_ip: ${ip}
+%{ endfor ~}
+%{ for index, ip in worker_ips ~}
+    worker-${index + 1}:
+      ansible_host: ${ip}
+      ip: ${ip}
+      access_ip: ${ip}
+%{ endfor ~}
+
+  # 3. Define node groups using Kubespray's naming convention
+  children:
+    kube_control_plane:
+      hosts:
+%{ for index, ip in master_ips ~}
+        master-${index + 1}:
+%{ endfor ~}
+    
+    kube_node:
+      hosts:
+%{ for index, ip in worker_ips ~}
+        worker-${index + 1}:
+%{ endfor ~}
+    
+    # Kubespray requires an etcd group. It's standard to run etcd on the control plane nodes.
+    etcd:
+      hosts:
+%{ for index, ip in master_ips ~}
+        master-${index + 1}:
+%{ endfor ~}
+    
+    k8s_cluster:
+      children:
+        kube_control_plane: {}
+        kube_node: {}
+        
+    cilium_rr:
+      hosts: {}
