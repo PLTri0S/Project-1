@@ -8,12 +8,14 @@ import json
 from typing import Optional
 import sys
 import os
+import re
 
 BASE_DIR = Path(__file__).resolve().parent
 # Move up 1 folder
 PROJECT_ROOT = BASE_DIR.parent
 OPENTOFU_DIR = PROJECT_ROOT / "OpenTofu"
 GEMINI_FILE = PROJECT_ROOT / "GEMINI.md"
+GUIDE_FILE = PROJECT_ROOT / "Kubespray_VM_Provisioning_Guide.md"
 KUBESPRAY_DIR = PROJECT_ROOT / "kubespray"
 
 
@@ -41,6 +43,12 @@ def vms_config() -> str:
             
             
     return "\n".join(files)
+
+def read_info() -> str:
+    """Collect information for provisioning VMs and creating cluster."""                   
+    return GUIDE_FILE.read_text(encoding="utf-8")
+
+#print(read_info())
 
 # print(vms_config())
 def list_all_vms() -> str:
@@ -126,8 +134,6 @@ def provision_vms(
     config["Worker_config"]["ram"]   = vm_specs["w_ram"]
     config["Worker_config"]["vcpu"]  = vm_specs["w_vcpu"]
     
-    VAR_FILE.write_text(json.dumps(config, indent=2), encoding="utf-8")
-    print(f"Success: Configuration updated securely. New state: {json.dumps(config)}")
 
     if vm_specs["m_nodes"] % 2 == 0 :
         return "Control plane must be an odd number"
@@ -138,34 +144,64 @@ def provision_vms(
     required_disk = (vm_specs["m_nodes"] + vm_specs["w_nodes"]) * vm_specs["disk"] / to_B
     reserve_ram, reserve_cpu, reserve_disk = 3, 2, 100
 
-    if required_ram + reserve_ram > check["Ram total"]:
-        return (
-            f"Insufficient RAM: required {required_ram}GB + reserve {reserve_ram}GB, "
-            f"available {check["Ram available"]}GB. Reduce node counts or increase host memory."
-        )
+    if required_ram + reserve_ram > check["Ram available"]:
+        return {
+            "status": "Fail",
+            "error": {
+                "Insufficient RAM": f"required {required_ram}GB + reserve {reserve_ram}GB",
+                "Available":  f"{round(check["Ram available"])}GB.", 
+            },
+
+            "Fix": "Reduce node counts or memory."
+        }
     if required_cpu + reserve_cpu > check["cpus available"]:
-        return (
+        return {
             f"Insufficient cpu cores: required {required_cpu} cores + reserve {reserve_cpu} cores, "
             f"available {check['cpus available']} cores. Reduce node counts or increase host cpu cores."
-        )
+        }
     if required_disk + reserve_disk > check["Disk available"]:
-        return (
+        return {
             f"Insufficient disk: required {required_disk}GB + reserve {reserve_disk}GB, "
             f"available {check['Disk available']}GB. Reduce node counts or increase host disk."
-        )
+        }
     
-    else: 
-        try: 
-            _run_command(["tofu", "init"], path=OPENTOFU_DIR)
-            _run_command(["tofu", "plan"], path=OPENTOFU_DIR)
-            _run_command(["tofu", "apply", "-auto-approve"], path=OPENTOFU_DIR)
-            output = _run_command(["tofu", "output"], path=OPENTOFU_DIR)
-        except subprocess.CalledProcessError as e:
-            return (f"FAIL: {e}\n{e.stderr}")
-        return output.stdout
+    VAR_FILE.write_text(json.dumps(config, indent=2), encoding="utf-8")
+    print(f"Success: Configuration updated securely. New state: {json.dumps(config)}")
+    
+    try: 
+        _run_command(["tofu", "init"], path=OPENTOFU_DIR)
+        _run_command(["tofu", "plan"], path=OPENTOFU_DIR)
+        _run_command(["tofu", "apply", "-auto-approve", "-no-color"], path=OPENTOFU_DIR)
+        ips = _run_command(["tofu", "output", "-json"], path=OPENTOFU_DIR)
+    except subprocess.CalledProcessError as e:
+        return {
+            "status": "fail",
+            "command": e.cmd,
+            "error code": e.returncode,
+            "cause": e.stderr
+        }
+    
+    return {
+        "state": "Success",
+        "disk size": f"{vm_specs["disk"] / to_B}GB",
+
+        "Master": {
+            "nodes count": vm_specs["m_nodes"],
+            "ram": f"{vm_specs["m_ram"] / to_KB}GB",
+            "cpus": vm_specs["m_vcpu"],
+        },
+
+        "Worker": {
+            "nodes count": vm_specs["w_nodes"],
+            "ram": f"{vm_specs["w_ram"] / to_KB}GB",
+            "cpus": vm_specs["w_vcpu"],
+        },
+
+        "IPS": json.loads(ips.stdout)["IPS"]["value"]
+    }
             
             
-#print(provision_vms(disk_size=10, worker_nodes=1, worker_ram=2, master_ram=2, master_nodes=1, master_vcpu=2, worker_vcpu=2))
+#print(provision_vms(disk_size=10, worker_nodes=2, worker_ram=4, master_ram=4, master_nodes=1, master_vcpu=2, worker_vcpu=2))
 
 def destroy_vms(confirm: bool = False) -> str:
     """Destroy OpenTofu-managed VMs if confirmation is provided."""
@@ -175,14 +211,21 @@ def destroy_vms(confirm: bool = False) -> str:
     try:
         result = _run_command(["tofu", "destroy", "-auto-approve"], path=OPENTOFU_DIR)
     except subprocess.CalledProcessError as e:
-        return (f"FAIL: {e}\n{e.stderr}")
+        return {
+            "status": "fail",
+            "command": e.cmd,
+            "error code": e.returncode,
+            "cause": e.stderr
+        }
 
 
-    return result.stdout
+    return {
+        "status": "success"
+    }
 
 
 
-print(destroy_vms(True))
+#print(destroy_vms(True))
 
 def update_vms(
     master_nodes: int = None,
@@ -270,20 +313,38 @@ def update_vms(
             f"Insufficient CPU: need {delta_cpu} cores extra + {reserve_cpu} reserve, "
             f"only {check['cpus available']} cores free. Reduce nodes or increase host CPUs."
         )
-    else: 
-        try:
-            _run_command(["tofu", "init"], path=OPENTOFU_DIR)
-            _run_command(["tofu", "plan"], path=OPENTOFU_DIR)
+    
+    try:
+        _run_command(["tofu", "init"], path=OPENTOFU_DIR)
+        _run_command(["tofu", "plan"], path=OPENTOFU_DIR)
+        _run_command(["tofu", "apply", "-auto-approve"], path=OPENTOFU_DIR)
+        ips = _run_command(["tofu", "output", "-json"], path=OPENTOFU_DIR)
+    except subprocess.CalledProcessError as e:
+        try: 
             _run_command(["tofu", "apply", "-auto-approve"], path=OPENTOFU_DIR)
-            output = _run_command(["tofu", "output"], path=OPENTOFU_DIR)
+            _run_command(["tofu", "output"], path=OPENTOFU_DIR)
         except subprocess.CalledProcessError as e:
-            try: 
-                _run_command(["tofu", "apply", "-auto-approve"], path=OPENTOFU_DIR)
-                output = _run_command(["tofu", "output"], path=OPENTOFU_DIR)
-            except subprocess.CalledProcessError as e:
-                return (f"FAIL: {e}\n{e.stderr}")
+            return {
+                "status": "fail",
+                "command": e.cmd,
+                "error code": e.returncode,
+                "cause": e.stderr
+            }
 
-        return output.stdout
+    return {
+        "state": "Success",
+        "Master": {
+            "nodes count": master_nodes,
+            "ram": master_ram,
+            "cpus": master_vcpu,
+        },
+        "Worker": {
+            "nodes count": worker_nodes,
+            "ram": worker_ram,
+            "cpus": worker_vcpu,
+        },
+        "IPS": ips
+    }
 #print(update_vms(worker_ram=2))    
 # hashed_password = "$2b$13$9TUMcvNscgdeLCNlCRrT..zVbAjzVYDtQh0PpaOTlunU7xertbOCa"
 # def verify_access() -> str:
@@ -317,9 +378,11 @@ def deploy_cluster() -> str:
 
         # _run_command(["sudo", "chown", uid_gid, "home/msi/.kube/config"])
     except subprocess.CalledProcessError as e:
-        return (f"FAIL: {e}\n"
-                f"{e.stdout}\n"
-                f"{e.stderr}"
-                )
+        return {
+                "status": "fail",
+                "command": e.cmd,
+                "error code": e.returncode,
+                "cause": e.stderr
+            }
     return "Succesfully created cluster."
-#print(deploy_cluster())
+print(deploy_cluster())

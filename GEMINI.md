@@ -31,7 +31,7 @@ My-project/
 └── 
 
 ## Key flows
-1. Read resources: "infra://vms-config".
+1. **MUST Read resources: "internal://rules", "infra://kubespray-vm-provisioning".**
 2. Managing vms: Use suitable tools to managing VMs
 3. Managing cluster: Use suitable tools to managing cluster
 
