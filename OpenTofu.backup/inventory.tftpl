@@ -1,0 +1,26 @@
+---
+all:
+  # 1. Define global variables here. Every host will inherit these.
+  vars:
+    ansible_user: ubuntu
+    ansible_ssh_private_key_file: ~/.ssh/id_ed25519  # Adjust to your actual key name
+    ansible_python_interpreter: /usr/bin/python3
+
+  # 2. Define your node groups
+  children:
+    masters:
+      hosts:
+%{ for ip in master_ips ~}
+        ${ip}:
+%{ endfor ~}
+    
+    workers:
+      hosts:
+%{ for ip in worker_ips ~}
+        ${ip}:
+%{ endfor ~}
+    
+    k8s_cluster:
+      children:
+        masters: {}
+        workers: {}

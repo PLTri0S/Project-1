@@ -1,57 +1,119 @@
 import subprocess
 import psutil
 from pathlib import Path
-from collections import Counter
-from passlib.hash import bcrypt
 from getpass import getpass
 import json
-from typing import Optional
-import sys
+from ruamel.yaml import YAML
 import os
+import re
+
+KB = 1024**2
+B  = 1024**3
 
 BASE_DIR = Path(__file__).resolve().parent
 # Move up 1 folder
 PROJECT_ROOT = BASE_DIR.parent
 OPENTOFU_DIR = PROJECT_ROOT / "OpenTofu"
 GEMINI_FILE = PROJECT_ROOT / "GEMINI.md"
+GUIDE_FILE = PROJECT_ROOT / "Kubespray_VM_Provisioning_Guide.md"
 KUBESPRAY_DIR = PROJECT_ROOT / "kubespray"
-def _run_command(args: list, path = None) -> subprocess.CompletedProcess:
+NETWORK_PLUGIN = KUBESPRAY_DIR / "inventory" / "mycluster" / "group_vars" / "k8s_cluster" / "k8s-cluster.yml"
+
+VAR_FILE = OPENTOFU_DIR / "terraform.tfvars.json"
+
+KUBESPRAY_VENV = KUBESPRAY_DIR / ".venv"
+env = os.environ.copy()
+env["VIRTUAL_ENV"] = KUBESPRAY_VENV
+env["PATH"] = f"{KUBESPRAY_VENV}/bin:{env['PATH']}"
+env.pop("PYTHONHOME", None)
+def _run_command(args: list, path = None, environment= None, timeout=None) -> subprocess.CompletedProcess:
     return subprocess.run(
     args,
     cwd=path,
-    capture_output=True,
+    env=environment,
+    capture_output=True,   
     text=True,
     check=True,
+    timeout=timeout
     )
 
-def vms_config() -> str:
-    """Collect OpenTofu configuration files and return them with file headers."""
-    contents  = []
-    files = []
+# def vms_config() -> str:
+#     """Collect OpenTofu configuration files and return them with file headers."""
+#     contents  = []
+#     files = []
 
-    for d in (OPENTOFU_DIR, OPENTOFU_DIR / "config"):
-        for path in sorted(d.glob("*")):
-            if path.is_file() and path.suffix in [".tofu", ".py", ".yaml", ".tftpl", ".json"]:
-                file_header = f"---START OF FILE: {path.relative_to(PROJECT_ROOT)}---"
-                contents.append(f"{file_header}\n{path.read_text(encoding='utf-8')}\n")
-                files.append(file_header)
+#     for d in (OPENTOFU_DIR, OPENTOFU_DIR / "config"):
+#         for path in sorted(d.glob("*")):
+#             if path.is_file() and path.suffix in [".tofu", ".py", ".yaml", ".tftpl", ".json"]:
+#                 file_header = f"---START OF FILE: {path.relative_to(PROJECT_ROOT)}---"
+#                 contents.append(f"{file_header}\n{path.read_text(encoding='utf-8')}\n")
+#                 files.append(file_header)
             
             
-    return "\n".join(files)
+#     return "\n".join(files)
+
+def read_info() -> str:
+    """Collect information for provisioning VMs and creating cluster."""                   
+    return GUIDE_FILE.read_text(encoding="utf-8")
+
+#print(read_info())
 
 # print(vms_config())
-def list_all_vms() -> str:
-    """
-    Lists all virtual machines (running and stopped) on the host.
-    Mimics the output of 'virsh list --all'.
-    """
+def list_vms() -> dict:
+    count_run = 0
+    count_off = 0
     try:
-        # Execute the command on the host system
-        print(_run_command(["virsh", "list", "--all"]).stdout)
+        status = _run_command(["virsh", "list", "--all"])
+        for line in status.stdout.splitlines():
+            match_run = re.search(r"running", line)
+            match_off = re.search(r"shut off", line)
+            if match_run:
+                count_run += 1
+            elif match_off:
+                count_off += 1
+        return {
+            "Status": "Success",
+            "State": {
+                "running": count_run,
+                "shut off": count_off
+            }
+        }
+            
     except subprocess.CalledProcessError as e:
-        return {e.stderr}
-        
+        return {
+            "Status": "Failed",
+            "Error code": e.returncode,
+            "Causes": e.stderr
+        }
+#print(list_vms())
 
+def start_and_stop_vms(start: bool = False, shutoff: bool = False) -> dict:
+
+    try:
+        cmd = _run_command(["virsh", "list", "--all"]) 
+        for line in cmd.stdout.splitlines():
+            if start:
+                #print(line)
+                match_name = re.search(r"(\w+-\d+)\s+shut off", line)
+                if match_name: 
+                    #print(match_name.group(1))
+                    _run_command(["virsh", "start", match_name.group(1)])
+            elif shutoff:
+                match_name = re.search(r"(\w+-\d+)\s+running", line)
+                if match_name: 
+                    #print(match_name.group(1))
+                    _run_command(["virsh", "shutdown", match_name.group(1)])
+        return {
+            "Status": "Success"
+        }
+    except subprocess.CalledProcessError as e:
+        return {
+            "Status": "Failed",
+            "Error code": e.returncode,
+            "Causes": e.stderr
+        }
+#print(start_and_stop_vms(shutoff=True))     
+           
 def check_machine_specs() -> dict:
     """check the machine current availability."""
   
@@ -60,109 +122,122 @@ def check_machine_specs() -> dict:
     cpus = psutil.cpu_count(logical=True)
 
     return {
-        "Ram total":      ram.total / to_B,
-        "Ram available":  ram.available / to_B,
-        "Disk total":     disk.total / to_B,
-        "Disk available": disk.free / to_B,
-        "cpus available": cpus
+        "Ram total":      f"{round(ram.total / B)}GB",
+        "Disk total":     f"{round(disk.total / B)}GB",
+        "cpus available": f"{cpus} cores" 
     }
+#print(check_machine_specs())
 
-VAR_FILE = OPENTOFU_DIR / "terraform.tfvars.json"
-
-to_KB = 1024**2
-to_B  = 1024**3
 def provision_vms(
-    disk_size: float = None,
-    master_nodes: int = None,
-    master_ram: float = None,
-    master_vcpu: int = None,
-    worker_nodes: int = None,
-    worker_ram: float = None,
-    worker_vcpu: int = None,
-):
+    disk_size: float,
+    master_nodes: int,
+    master_ram: float,
+    master_vcpu: int,
+    worker_nodes: int,
+    worker_ram: float,
+    worker_vcpu: int,
+) -> dict:
     """Provision VMs using OpenTofu.
     Provision new VMs.
     Only provided values will be changed; others remain at their current state.
+    Input are all in GB.
 
     Validation and flow:
     1. validate master/worker counts
     2. estimate RAM, cpu and disk requirements
     3. run tofu init, plan, apply, output
     """
+    ram_free  = round(psutil.virtual_memory().available / B)
+    disk_free = round(psutil.disk_usage('/').free / B)
+    cpus_free = psutil.cpu_count(logical=True)
 
-    if not VAR_FILE.exists():
-        return "File not exit"
+    config = json.loads(VAR_FILE.read_text(encoding="utf-8"))
+
+    config["volume_config"]["size"]  = disk_size *B
+    config["Master_config"]["nodes"] = master_nodes 
+    config["Master_config"]["ram"]   = master_ram * KB
+    config["Master_config"]["vcpu"]  = master_vcpu
+    config["Worker_config"]["nodes"] = worker_nodes
+    config["Worker_config"]["ram"]   = worker_ram *KB
+    config["Worker_config"]["vcpu"]  = worker_vcpu
+
+    if master_nodes % 2 == 0 :
+        return {
+            "status": "Fail to provision VMs",
+            "ERROR": "Control plane must be an odd number"
+        }
+
+    required_ram = master_nodes * master_ram + worker_nodes * worker_ram
+    required_cpu = master_nodes * master_vcpu + worker_nodes * worker_vcpu
+    required_disk = (master_nodes + worker_nodes) * disk_size
+    reserve_ram, reserve_cpu, reserve_disk = 3, 2, 50
+
+    if required_ram + reserve_ram > ram_free:
+        return {
+            "status": "Fail",
+            "error": {
+                "Insufficient RAM": f"required {required_ram}GB + reserve {reserve_ram}GB",
+                "Available":  f"{ram_free}GB.", 
+            },
+
+            "Fix": "Reduce node counts or memory."
+        }
+    if required_cpu + reserve_cpu > cpus_free:
+        return {
+            "status": "Fail",
+            "error": {
+                "Insufficient CPUs": f"required {required_cpu} cores + reserve {reserve_cpu} cores",
+                "Available":  f"{cpus_free} cores.", 
+            },
+
+            "Fix": "Reduce node counts or cpu cores."
+        }
+    if required_disk + reserve_disk > disk_free:
+        return {
+            "status": "Fail",
+            "error": {
+                "Insufficient disk": f"required {required_disk}GB + reserve {reserve_disk}GB",
+                "Available":  f"{disk_free}GB.", 
+            },
+
+            "Fix": "Reduce node counts or disk."
+        }        
+
+    VAR_FILE.write_text(json.dumps(config, indent=2), encoding="utf-8")     
+
     try:
-        config = json.loads(VAR_FILE.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return "Warning: file was corrupted."
+        _run_command(["tofu", "init", "-no-color"], path=OPENTOFU_DIR)
+        _run_command(["tofu", "plan", "-no-color"], path=OPENTOFU_DIR)
+        _run_command(["tofu", "apply", "-auto-approve", "-no-color"], path=OPENTOFU_DIR)
+        ips = _run_command(["tofu", "output", "-json"], path=OPENTOFU_DIR)
+    except subprocess.CalledProcessError as e:
+        return {
+            "status": "fail",
+            "command": e.cmd,
+            "error code": e.returncode,
+            "cause": e.stderr
+        }
+    
+    return {
+        "state": "Success",
+        "disk size": f"{disk_size}GB",
 
-    vm_specs = {
-        "disk":    config["volume_config"]["size"],
-        "m_nodes": config["Master_config"]["nodes"],
-        "m_ram":   config["Master_config"]["ram"],
-        "m_vcpu":  config["Master_config"]["vcpu"],
-        "w_nodes": config["Worker_config"]["nodes"],
-        "w_ram":   config["Worker_config"]["ram"],
-        "w_vcpu":  config["Worker_config"]["vcpu"],
+        "Master": {
+            "nodes count": master_nodes,
+            "ram": f"{master_ram}GB",
+            "cpus": master_vcpu,
+        },
+
+        "Worker": {
+            "nodes count": worker_nodes,
+            "ram": f"{worker_ram}GB",
+            "cpus": worker_vcpu,
+        },
+
+        "IPS": json.loads(ips.stdout)["IPS"]["value"]
     }
-
-    if disk_size is not None:    vm_specs["disk"]    = disk_size * to_B
-    if master_nodes is not None: vm_specs["m_nodes"] = master_nodes
-    if master_ram is not None:   vm_specs["m_ram"]   = master_ram * to_KB 
-    if master_vcpu is not None:  vm_specs["m_vcpu"]  = master_vcpu 
-    if worker_nodes is not None: vm_specs["w_nodes"] = worker_nodes
-    if worker_ram is not None:   vm_specs["w_ram"]   = worker_ram * to_KB
-    if worker_vcpu is not None:  vm_specs["w_vcpu"]  = worker_vcpu 
-
-    config["volume_config"]["size"]  = vm_specs["disk"]
-    config["Master_config"]["nodes"] = vm_specs["m_nodes"]
-    config["Master_config"]["ram"]   = vm_specs["m_ram"]
-    config["Master_config"]["vcpu"]  = vm_specs["m_vcpu"]
-    config["Worker_config"]["nodes"] = vm_specs["w_nodes"]
-    config["Worker_config"]["ram"]   = vm_specs["w_ram"]
-    config["Worker_config"]["vcpu"]  = vm_specs["w_vcpu"]
-    
-    VAR_FILE.write_text(json.dumps(config, indent=2), encoding="utf-8")
-    print(f"Success: Configuration updated securely. New state: {json.dumps(config)}")
-
-    if vm_specs["m_nodes"] % 2 == 0 :
-        return "Control plane must be an odd number"
-
-    check = check_machine_specs()
-    required_ram = vm_specs["m_nodes"] * (vm_specs["m_ram"] / to_KB) + vm_specs["w_nodes"] * (vm_specs["w_ram"] / to_KB)
-    required_cpu = vm_specs["m_nodes"] * vm_specs["m_vcpu"] + vm_specs["w_nodes"] * vm_specs["w_vcpu"]
-    required_disk = (vm_specs["m_nodes"] + vm_specs["w_nodes"]) * vm_specs["disk"] / to_B
-    reserve_ram, reserve_cpu, reserve_disk = 3, 2, 100
-
-    if required_ram + reserve_ram > check["Ram total"]:
-        return (
-            f"Insufficient RAM: required {required_ram}GB + reserve {reserve_ram}GB, "
-            f"available {check["Ram available"]}GB. Reduce node counts or increase host memory."
-        )
-    if required_cpu + reserve_cpu > check["cpus available"]:
-        return (
-            f"Insufficient cpu cores: required {required_cpu} cores + reserve {reserve_cpu} cores, "
-            f"available {check['cpus available']} cores. Reduce node counts or increase host cpu cores."
-        )
-    if required_disk + reserve_disk > check["Disk available"]:
-        return (
-            f"Insufficient disk: required {required_disk}GB + reserve {reserve_disk}GB, "
-            f"available {check['Disk available']}GB. Reduce node counts or increase host disk."
-        )
-    
-    else: 
-        try: 
-            _run_command(["tofu", "init"], path=OPENTOFU_DIR)
-            _run_command(["tofu", "plan"], path=OPENTOFU_DIR)
-            _run_command(["tofu", "apply", "-auto-approve"], path=OPENTOFU_DIR)
-            output = _run_command(["tofu", "output"], path=OPENTOFU_DIR)
-        except subprocess.CalledProcessError as e:
-            return (f"FAIL: {e}\n{e.stderr}")
-        return output.stdout
-            
-            
-#print(provision_vms(disk_size=12, worker_nodes=1, worker_ram=2, master_ram=2, master_nodes=1, master_vcpu=3))
+               
+#print(provision_vms(disk_size=10, worker_nodes=1, worker_ram=1.5, master_ram=1.5, master_nodes=1, master_vcpu=2, worker_vcpu=1))
 
 def destroy_vms(confirm: bool = False) -> str:
     """Destroy OpenTofu-managed VMs if confirmation is provided."""
@@ -170,16 +245,21 @@ def destroy_vms(confirm: bool = False) -> str:
         return "Cancelled"
 
     try:
-        result = _run_command(["tofu", "destroy", "-auto-approve"])
+        _run_command(["tofu", "destroy", "-auto-approve", "-no-color"], path=OPENTOFU_DIR)
     except subprocess.CalledProcessError as e:
-        return (f"FAIL: {e}\n{e.stderr}")
+        return {
+            "status": "fail",
+            "command": e.cmd,
+            "error code": e.returncode,
+            "cause": e.stderr
+        }
 
 
-    return result.stdout
+    return {
+        "status": "Destroy Successfully"
+    }
 
-
-
-#print(destroy_vms(True))
+#print(destroy_vms(confirm=True))
 
 def update_vms(
     master_nodes: int = None,
@@ -188,19 +268,19 @@ def update_vms(
     worker_nodes: int = None,
     worker_ram: float = None,
     worker_vcpu: int = None,
-):
+) -> dict:
     """
     Updates exit VMs.
     Only provided values will be changed; others remain at their current state.
-    """
-    if not VAR_FILE.exists():
-        return {}
-    try:
-        config = json.loads(VAR_FILE.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        print("Warning: file was corrupted. Starting with an empty config.")
-        return {}
-    
+    Input are all in GB.
+
+    """   
+    ram_free  = round(psutil.virtual_memory().available / B)
+    disk_free = round(psutil.disk_usage('/').free / B)
+    cpus_free = psutil.cpu_count(logical=True)
+
+    config = json.loads(VAR_FILE.read_text(encoding="utf-8"))
+
 # --- capture OLD specs before overwriting ---
     old_specs = {
         "disk":    config["volume_config"]["size"],
@@ -223,12 +303,12 @@ def update_vms(
     }
 
     if master_nodes is not None: vm_specs["m_nodes"] = master_nodes
-    if master_ram is not None:   vm_specs["m_ram"]   = master_ram * to_KB 
+    if master_ram is not None:   vm_specs["m_ram"]   = master_ram * KB 
     if master_vcpu is not None:  vm_specs["m_vcpu"]  = master_vcpu 
     if worker_nodes is not None: vm_specs["w_nodes"] = worker_nodes
-    if worker_ram is not None:   vm_specs["w_ram"]   = worker_ram * to_KB
+    if worker_ram is not None:   vm_specs["w_ram"]   = worker_ram * KB
     if worker_vcpu is not None:  vm_specs["w_vcpu"]  = worker_vcpu 
-
+    
     config["Master_config"]["nodes"] = vm_specs["m_nodes"]
     config["Master_config"]["ram"]   = vm_specs["m_ram"]
     config["Master_config"]["vcpu"]  = vm_specs["m_vcpu"]
@@ -236,19 +316,18 @@ def update_vms(
     config["Worker_config"]["ram"]   = vm_specs["w_ram"]
     config["Worker_config"]["vcpu"]  = vm_specs["w_vcpu"]
     
-    VAR_FILE.write_text(json.dumps(config, indent=2), encoding="utf-8")
-    print(f"Success: Configuration updated securely. New state: {json.dumps(config)}")
-
     if vm_specs["m_nodes"] % 2 == 0:
-        return "Control plane must be an odd number"
+        return {
+            "status": "Fail to provision VMs",
+            "ERROR": "Control plane must be an odd number"
+        }
 
-    check = check_machine_specs()
     # --- compute OLD allocation ---
-    old_ram  = old_specs["m_nodes"] * (old_specs["m_ram"]  / to_KB) + old_specs["w_nodes"] * (old_specs["w_ram"]  / to_KB)
+    old_ram  = old_specs["m_nodes"] * (old_specs["m_ram"]  / KB) + old_specs["w_nodes"] * (old_specs["w_ram"]  / KB)
     old_cpu  = old_specs["m_nodes"] *  old_specs["m_vcpu"] + old_specs["w_nodes"] *  old_specs["w_vcpu"]
 
     # --- compute NEW allocation ---
-    new_ram  = vm_specs["m_nodes"] * (vm_specs["m_ram"]  / to_KB) + vm_specs["w_nodes"] * (vm_specs["w_ram"]  / to_KB)
+    new_ram  = vm_specs["m_nodes"] * (vm_specs["m_ram"]  / KB) + vm_specs["w_nodes"] * (vm_specs["w_ram"]  / KB)
     new_cpu  = vm_specs["m_nodes"] *  vm_specs["m_vcpu"] + vm_specs["w_nodes"] *  vm_specs["w_vcpu"]
 
     # --- only the DELTA needs to fit in available headroom ---
@@ -257,31 +336,68 @@ def update_vms(
 
     reserve_ram, reserve_cpu = 3, 2
 
-    if delta_ram + reserve_ram > check["Ram available"]:
-        return (
-            f"Insufficient RAM: need {delta_ram}GB extra + {reserve_ram}GB reserve, "
-            f"only {check['Ram available']}GB free. Reduce nodes or increase host memory."
-        )
-    if delta_cpu + reserve_cpu > check["cpus available"]:
-        return (
-            f"Insufficient CPU: need {delta_cpu} cores extra + {reserve_cpu} reserve, "
-            f"only {check['cpus available']} cores free. Reduce nodes or increase host CPUs."
-        )
-    else: 
-        try:
-            _run_command(["tofu", "init"])
-            _run_command(["tofu", "plan"])
-            _run_command(["tofu", "apply", "-auto-approve"])
-            output = _run_command(["tofu", "output"])
-        except subprocess.CalledProcessError as e:
-            try: 
-                _run_command(["tofu", "apply", "-auto-approve"])
-                output = _run_command(["tofu", "output"])
-            except subprocess.CalledProcessError as e:
-                return (f"FAIL: {e}\n{e.stderr}")
+    if delta_ram + reserve_ram > ram_free:
+        return {
+            "status": "Fail",
+            "error": {
+                "Insufficient RAM": f"required {delta_ram}GB + reserve {reserve_ram}GB",
+                "Available":  f"{ram_free}GB.", 
+            },
 
-        return output.stdout
-#print(update_vms(worker_nodes=1, worker_ram=2, master_ram=2, master_nodes=1, master_vcpu=2))    
+            "Fix": "Reduce node counts or memory."
+        }
+    if delta_cpu + reserve_cpu > cpus_free:
+        return {
+            "status": "Fail",
+            "error": {
+                "Insufficient CPUs": f"required {delta_cpu} cores + reserve {reserve_cpu} cores",
+                "Available":  f"{cpus_free} cores.", 
+            },
+
+            "Fix": "Reduce node counts or cpu cores."
+        }
+
+    VAR_FILE.write_text(json.dumps(config, indent=2), encoding="utf-8")
+
+    try:
+        _run_command(["tofu", "init", "-no-color"], path=OPENTOFU_DIR)
+        _run_command(["tofu", "plan", "-no-color"], path=OPENTOFU_DIR)
+        _run_command(["tofu", "apply", "-auto-approve", "-no-color"], path=OPENTOFU_DIR)
+        ips = _run_command(["tofu", "output", "-json"], path=OPENTOFU_DIR)
+    except subprocess.CalledProcessError as e:
+        # Run again to reset the uuid to each vms in order to work
+        try: 
+            _run_command(["tofu", "apply", "-auto-approve", "-no-color"], path=OPENTOFU_DIR)
+            ips = _run_command(["tofu", "output", "-json"], path=OPENTOFU_DIR)
+        except subprocess.CalledProcessError as e:
+            return {
+                "status": "fail",
+                "command": e.cmd,
+                "error code": e.returncode,
+                "cause": e.stderr
+            }
+
+    return {
+        "state": "Success",
+        "disk size": f"{vm_specs["disk"] / B}GB",
+
+        "Master": {
+            "nodes count": vm_specs["m_nodes"],
+            "ram": f"{vm_specs["m_ram"] / KB}GB",
+            "cpus": vm_specs["m_vcpu"],
+        },
+
+        "Worker": {
+            "nodes count": vm_specs["w_nodes"],
+            "ram": f"{vm_specs["w_ram"] / KB}GB",
+            "cpus": vm_specs["w_vcpu"],
+        },
+
+        "IPS": json.loads(ips.stdout)["IPS"]["value"]
+    }
+
+#print(update_vms(worker_nodes=3, worker_ram=2, worker_vcpu=1, master_nodes=1, master_ram=2.5, master_vcpu=2))    
+
 # hashed_password = "$2b$13$9TUMcvNscgdeLCNlCRrT..zVbAjzVYDtQh0PpaOTlunU7xertbOCa"
 # def verify_access() -> str:
 #     """Always ask for password if user want to manage cluster"""
@@ -294,27 +410,217 @@ def update_vms(
 #         tries += 1
 #     return "Too many failed attempts. Access Denied."
 
-# def destroy_vms():
-#     verify_access()
-#     n = str(input("Are you sure you want to delete all the vms? y/n\n"))
-#     if (n.lower() == "y"):
-#         try:
-#             destroy = subprocess.run(["tofu", "destroy", "-auto-approve"], cwd=OPENTOFU_DIR, check=True)
-#         except subprocess.CalledProcessError as e:
-#             return e.stderr
-#         return destroy.stdout
-#     else: return "Cancelled"
+def handling_ansible_error(error: str) -> dict:
+        error_dict = {}
+        count = 1
+        Task_error = False
+        for line in error.stdout.splitlines():
+            target_node = re.search(r"(fatal:\s)(\D+\d\D+!)", line)
+            msg = re.search(r"(msg\"\:\s)(\"\D+\d|\D+)",line)
+            task = re.search(r"(TASK\s)(\D+[^\s*])", line)
+            if target_node:
+                error_dict[f"node-{count}"] = target_node.group(2)
+                Task_error = True
+            if task:
+                error_dict[f"TASK-{count}"] = task.group(2)
+            if msg and Task_error:
+                error_dict[f"msg-{count}"] = msg.group(2)
+                count +=1
 
-# print(destroy_vms())
+        return {
+            "status": "fail",
+            "command": error.cmd,
+            "error code": error.returncode,
+            "cause": error_dict
+        }
+def deploy_cluster(network: str) -> dict:
+    """
+    Create cluster using kubespray.
+    Running playbook required in kubespray environment
+    Choose network plugin (cilium, calico, kube-ovn or flannel. Use cni for generic cni plugin).
+    """
+    #uid_gid = f"{os.getuid()}:{os.getgid()}"
 
-def create_cluster() -> str:
-    """Create cluster using kubespray"""
+    yaml = YAML()
+    yaml.preserve_quotes = True
+
+    with open(NETWORK_PLUGIN, "r") as file:
+        data = yaml.load(file)
+
+    data["kube_network_plugin"] = network
+    with open(NETWORK_PLUGIN, "w") as file:
+        yaml.dump(data, file)
+
     try:
-        _run_command(["ansible-playbook", "-i", "inventory/mycluster/inventory.yaml", "-b", "playbooks/cluster.yml"], path="/home/msi/Vscode/Ansible/My-project/kubespray/.venv")
+        _run_command(["ansible-playbook", "-i", "inventory/mycluster/inventory.yaml", "-b", "cluster.yml"], path=KUBESPRAY_DIR, environment=env)
+        # Only run this command if using cilium network plugin
+        if network == "cilium":
+            _run_command(["ansible-playbook", "-i", "inventory/mycluster/inventory.yaml", "-b", "playbooks/cilium_error_fix.yml"], path=KUBESPRAY_DIR, environment=env)
+        _run_command(["ansible-playbook", "-i", "inventory/mycluster/inventory.yaml", "-b", "playbooks/setup_kubeconfig.yml"], path=KUBESPRAY_DIR, environment=env)
+
+        # _run_command(["sudo", "chown", uid_gid, "home/msi/.kube/config"])
     except subprocess.CalledProcessError as e:
-        return (f"FAIL: {e}\n"
-                f"{e.stdout}\n"
-                f"{e.stderr}"
-                )
-    return "Succesfully created cluster."
-print(create_cluster())
+        return handling_ansible_error(e)
+    
+    return {
+        "status": "Succesfully created cluster"
+        }
+print(deploy_cluster(network="cilium"))
+
+def get_nodes() -> dict:
+    cluster = _run_command(["kubectl", "get", "nodes"])
+    count_m = 0
+    count_w = 0
+    for line in cluster.stdout.splitlines():
+        master = re.search(r"master-\d+", line)
+        worker = re.search(r"worker-\d+", line)
+        if master:
+            count_m += 1
+        if worker:
+            count_w += 1
+    return {
+        "master-nodes-count": count_m,
+        "worker-nodes-count": count_w
+    }
+
+def scale_up(master: int, worker: int, network: str) -> dict:
+    """
+    Scale cluster by adding more master nodes using cluster.yml or worker nodes using Kubespray scale.yml.
+
+    The inventory must already include the new worker hosts.
+    """
+    ## current 2 vms -> scale up 2 nodes -> need 1 more vms
+    ## if scale up but no available vms -> Fail -> need to create vms first then scale up node
+    config = json.loads(VAR_FILE.read_text(encoding="utf-8"))
+    worker_c = get_nodes()["worker-nodes-count"]
+    master_c = get_nodes()["master-nodes-count"]
+
+    if worker:
+        if worker_c + worker > config["Worker_config"]["nodes"] or worker_c + worker < config["Worker_config"]["nodes"]:
+            return {
+                "Status": "Fail",
+                "Cause": f"Need {worker_c + worker - config["Worker_config"]["nodes"]} more worker Vms to scale up cluster, currently {config["Worker_config"]["nodes"]} worker."
+            }
+        
+        scale_up_worker = [f"worker-{n}" for n in range(worker_c + 1, worker_c + worker + 1)]
+        try:
+            _run_command(["ansible-playbook", "-i", "inventory/mycluster/inventory.yaml", "-b","playbooks/facts.yml"], path=KUBESPRAY_DIR, environment=env)
+            _run_command(["ansible-playbook", "-i", "inventory/mycluster/inventory.yaml", "-b", "scale.yml", "--limit=" + ",".join(scale_up_worker)], path=KUBESPRAY_DIR, environment=env)
+            if network == "cilium":
+                _run_command(["ansible-playbook", "-i", "inventory/mycluster/inventory.yaml", "-b", "playbooks/cilium_error_fix.yml"], path=KUBESPRAY_DIR, environment=env)
+
+        except subprocess.CalledProcessError as e:
+            return handling_ansible_error(e)
+    if master:
+        if master_c + master > config["Master_config"]["nodes"] or master_c + master < config["Master_config"]["nodes"]:
+            return {
+                "Status": "Fail",
+                "Cause": f"Need {master_c + master - config["Master_config"]["nodes"]} more master Vms to scale up cluster, currently {config["Master_config"]["nodes"]} master"
+            }
+        try:
+            _run_command(["ansible-playbook", "-i", "inventory/mycluster/inventory.yaml", "-b", "cluster.yml"], path=KUBESPRAY_DIR, environment=env)
+        except subprocess.CalledProcessError as e:
+            return handling_ansible_error(e)
+        
+    return {
+        "status": "success",
+        "scale_up_master": master,
+        "scale_up_worker": worker,
+        "detail": "Scale up finished successfully"
+    }
+#print(scale_up(master=0, worker=1, network="cilium"))
+
+def scale_down(master: int, worker: int) -> dict:
+    """
+    Scale down cluster by remove master nodes using cluster.yml or worker nodes using Kubespray scale.yml.
+
+    The inventory must already include the new worker hosts.
+    """
+    ## current 2 vms -> scale up 2 nodes -> need 1 more vms
+    ## if scale up but no available vms -> Fail -> need to create vms first then scale up node
+    config = json.loads(VAR_FILE.read_text(encoding="utf-8"))
+    running_nodes = get_nodes()
+    worker_c = running_nodes["worker-nodes-count"]
+    master_c = running_nodes["master-nodes-count"]
+
+    if worker:
+        scale_down_worker = [f"worker-{n}" for n in range(worker_c, worker_c - worker, -1)]
+        try:
+            _run_command(["ansible-playbook", "-i", "inventory/mycluster/inventory.yaml", "-b", "remove_node.yml", "-e", f"node={','.join(scale_down_worker)}" ], path=KUBESPRAY_DIR, environment=env)
+        except subprocess.CalledProcessError as e:
+            return handling_ansible_error(e)
+    if master:
+        if (master_c - master) % 2 == 0:
+            return {
+                "status": "Fail to scale down",
+                "ERROR": "Control plane must be an odd number"
+            }
+
+        scale_down_master = [f"master-{n}" for n in range(master_c, master_c - master, -1)]
+        try:
+            _run_command(["ansible-playbook", "-i", "inventory/mycluster/inventory.yaml", "-b", "remove_node.yml", "-e", f"node={','.join(scale_down_master)}" ], path=KUBESPRAY_DIR, environment=env)
+        except subprocess.CalledProcessError as e:
+            return handling_ansible_error(e)
+
+    return {
+        "status": "success",
+        "scale_down_master": master,
+        "scale_down_worker": worker,
+        "detail": "Scale down finished successfully"
+    }
+#print(scale_down(master=0, worker=2))
+
+def remove_cluster(confirm: bool=False) -> dict:
+    """
+    Remove cluster using kubespray reset.yml playbook.
+    """
+    if not confirm:
+        return {
+            "status": "fail",
+            "cause": "Confirmation required to remove cluster"
+        }
+    try:
+        _run_command(["ansible-playbook", "-i", "inventory/mycluster/inventory.yaml", "-b", "reset.yml", "-e", "reset_confirmation=yes"], path=KUBESPRAY_DIR, environment=env)
+    except subprocess.CalledProcessError as e:
+        return handling_ansible_error(e)
+    
+    return {
+        "status": "Successfully removed cluster"
+    }
+#print(remove_cluster(True))
+
+def check_connection() -> dict: 
+    """
+    Check connection each vms in inventory file.
+    """
+    try:
+        _run_command(["ansible", "all", "-i", "inventory/mycluster/inventory.yaml", "-m", "ping"], path=KUBESPRAY_DIR, environment=env, timeout=5)
+
+    except subprocess.TimeoutExpired as t:
+        return {
+            "status": "fail",
+            "command": t.cmd,
+            "cause": "Timeout error"
+        }
+    except subprocess.SubprocessError as e:
+        return handling_ansible_error(e)
+    
+    return {
+        "status": "Successfully connected to all cluster nodes"
+    }
+#print(check_connection())
+
+def network_plugin(network: str) -> dict:
+    yaml = YAML()
+    yaml.preserve_quotes = True
+
+    with open(NETWORK_PLUGIN, "r") as file:
+        data = yaml.load(file)
+
+    data["kube_network_plugin"] = network
+    with open(NETWORK_PLUGIN, "w") as file:
+        yaml.dump(data, file)
+
+    print("YAML file updated successfully!")
+#print(network_plugin("calico"))
+
