@@ -70,7 +70,7 @@ def read_info() -> str:
     return SPECS_FILE.read_text(encoding="utf-8")
 
 @mcp.resource("infra://known-issue")
-def read_info() -> str:
+def read_issue() -> str:
     """Collect information for know issue and possible fix."""                   
     return KNOWN_ISSUE_FILE.read_text(encoding="utf-8")
 

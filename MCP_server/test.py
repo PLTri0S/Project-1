@@ -18,6 +18,7 @@ GEMINI_FILE = PROJECT_ROOT / "GEMINI.md"
 GUIDE_FILE = PROJECT_ROOT / "Kubespray_VM_Provisioning_Guide.md"
 KUBESPRAY_DIR = PROJECT_ROOT / "kubespray"
 NETWORK_PLUGIN = KUBESPRAY_DIR / "inventory" / "mycluster" / "group_vars" / "k8s_cluster" / "k8s-cluster.yml"
+WEB_SERVER = PROJECT_ROOT / "web_server"
 
 VAR_FILE = OPENTOFU_DIR / "terraform.tfvars.json"
 
@@ -112,7 +113,7 @@ def start_and_stop_vms(start: bool = False, shutoff: bool = False) -> dict:
             "Error code": e.returncode,
             "Causes": e.stderr
         }
-#print(start_and_stop_vms(shutoff=True))     
+#print(start_and_stop_vms(start=True))     
            
 def check_machine_specs() -> dict:
     """check the machine current availability."""
@@ -237,7 +238,7 @@ def provision_vms(
         "IPS": json.loads(ips.stdout)["IPS"]["value"]
     }
                
-#print(provision_vms(disk_size=10, worker_nodes=1, worker_ram=1.5, master_ram=1.5, master_nodes=1, master_vcpu=2, worker_vcpu=1))
+#print(provision_vms(disk_size=10, worker_nodes=2, worker_ram=2, master_ram=3, master_nodes=1, master_vcpu=2, worker_vcpu=2))
 
 def destroy_vms(confirm: bool = False) -> str:
     """Destroy OpenTofu-managed VMs if confirmation is provided."""
@@ -396,7 +397,7 @@ def update_vms(
         "IPS": json.loads(ips.stdout)["IPS"]["value"]
     }
 
-#print(update_vms(worker_nodes=3, worker_ram=2, worker_vcpu=1, master_nodes=1, master_ram=2.5, master_vcpu=2))    
+#print(update_vms(worker_nodes=2, worker_ram=2, worker_vcpu=2, master_nodes=1, master_ram=3, master_vcpu=2))    
 
 # hashed_password = "$2b$13$9TUMcvNscgdeLCNlCRrT..zVbAjzVYDtQh0PpaOTlunU7xertbOCa"
 # def verify_access() -> str:
@@ -413,13 +414,14 @@ def update_vms(
 def handling_ansible_error(error: str) -> dict:
         error_dict = {}
         count = 1
-        Task_error = False
         for line in error.stdout.splitlines():
-            target_node = re.search(r"(fatal:\s)(\D+\d\D+!)", line)
+            target_node = re.search(r"(fatal:\s)(\D+\d\D+!)|\D+\d\D+!", line)
             msg = re.search(r"(msg\"\:\s)(\"\D+\d|\D+)",line)
             task = re.search(r"(TASK\s)(\D+[^\s*])", line)
+            Task_error = False
+
             if target_node:
-                error_dict[f"node-{count}"] = target_node.group(2)
+                error_dict[f"node-{count}"] = target_node.group(2) or target_node.group()
                 Task_error = True
             if task:
                 error_dict[f"TASK-{count}"] = task.group(2)
@@ -465,7 +467,7 @@ def deploy_cluster(network: str) -> dict:
     return {
         "status": "Succesfully created cluster"
         }
-print(deploy_cluster(network="cilium"))
+#print(deploy_cluster(network="calico"))
 
 def get_nodes() -> dict:
     cluster = _run_command(["kubectl", "get", "nodes"])
@@ -483,7 +485,7 @@ def get_nodes() -> dict:
         "worker-nodes-count": count_w
     }
 
-def scale_up(master: int, worker: int, network: str) -> dict:
+def scale(master: int, worker: int, network: str) -> dict:
     """
     Scale cluster by adding more master nodes using cluster.yml or worker nodes using Kubespray scale.yml.
 
@@ -528,9 +530,9 @@ def scale_up(master: int, worker: int, network: str) -> dict:
         "scale_up_worker": worker,
         "detail": "Scale up finished successfully"
     }
-#print(scale_up(master=0, worker=1, network="cilium"))
+#print(scale(master=0, worker=1, network="cilium"))
 
-def scale_down(master: int, worker: int) -> dict:
+def remove_node(master: int, worker: int) -> dict:
     """
     Scale down cluster by remove master nodes using cluster.yml or worker nodes using Kubespray scale.yml.
 
@@ -568,7 +570,7 @@ def scale_down(master: int, worker: int) -> dict:
         "scale_down_worker": worker,
         "detail": "Scale down finished successfully"
     }
-#print(scale_down(master=0, worker=2))
+#print(remove_node(master=0, worker=2))
 
 def remove_cluster(confirm: bool=False) -> dict:
     """
@@ -594,7 +596,7 @@ def check_connection() -> dict:
     Check connection each vms in inventory file.
     """
     try:
-        _run_command(["ansible", "all", "-i", "inventory/mycluster/inventory.yaml", "-m", "ping"], path=KUBESPRAY_DIR, environment=env, timeout=5)
+        _run_command(["ansible", "all", "-i", "inventory/mycluster/inventory.yaml", "-m", "ping"], path=KUBESPRAY_DIR, environment=env, timeout=10)
 
     except subprocess.TimeoutExpired as t:
         return {
@@ -624,3 +626,30 @@ def network_plugin(network: str) -> dict:
     print("YAML file updated successfully!")
 #print(network_plugin("calico"))
 
+def web_server(replicas: int) -> dict:
+    """Deploys a basic Nginx service to the cluster."""
+    WEB = WEB_SERVER / "nginx-deployment.yaml"
+    SERVICE = WEB_SERVER / "nginx-service.yaml"
+
+    yaml = YAML()
+    yaml.preserve_quotes = True
+
+    with open(WEB, "r") as file:
+        data = yaml.load(file)
+
+    data["spec"]["replicas"] = replicas
+    with open(WEB, "w") as file:
+        yaml.dump(data, file)
+
+    try:
+        _run_command(["kubectl", "apply", "-f", WEB])
+        _run_command(["kubectl", "apply", "-f", SERVICE])
+        return {"status": "Success", "access": "Nginx is available on NodePort 30080"}
+    except subprocess.CalledProcessError as e:
+        return {"status": "fail", "error": e.stderr}
+print(web_server(3))
+
+def test_server() -> dict:
+    output = _run_command(["hey", "-n", "5000", "-c", "100", "http://10.233.0.1:30080/"])
+    return output.stdout
+#print(test_server())

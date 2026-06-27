@@ -22,6 +22,7 @@ OPENTOFU_DIR = PROJECT_ROOT / "OpenTofu"
 VAR_FILE = OPENTOFU_DIR / "terraform.tfvars.json"
 NETWORK_PLUGIN = KUBESPRAY_DIR / "inventory" / "mycluster" / "group_vars" / "k8s_cluster" / "k8s-cluster.yml"
 INVENTORY = KUBESPRAY_DIR / "inventory" / "mycluster" / "inventory.yaml"
+WEB_SERVER = PROJECT_ROOT / "web_server"
 
 KUBESPRAY_VENV = KUBESPRAY_DIR / ".venv"
 env = os.environ.copy()
@@ -51,13 +52,14 @@ def get_nodes() -> dict:
 def handling_ansible_error(error: str) -> dict:
         error_dict = {}
         count = 1
-        Task_error = False
         for line in error.stdout.splitlines():
-            target_node = re.search(r"(fatal:\s)(\D+\d\D+!)", line)
+            target_node = re.search(r"(fatal:\s)(\D+\d\D+!)|\D+\d\D+!", line)
             msg = re.search(r"(msg\"\:\s)(\"\D+\d|\D+)",line)
             task = re.search(r"(TASK\s)(\D+[^\s*])", line)
+            Task_error = False
+
             if target_node:
-                error_dict[f"node-{count}"] = target_node.group(2)
+                error_dict[f"node-{count}"] = target_node.group(2) or target_node.group()
                 Task_error = True
             if task:
                 error_dict[f"TASK-{count}"] = task.group(2)
@@ -73,7 +75,7 @@ def handling_ansible_error(error: str) -> dict:
         }
 
 @mcp.resource("infra://inventory")
-def read_rules() -> str:
+def read_inventory() -> str:
     """INVENTORY FILE after provisioned vms"""
     return INVENTORY.read_text(encoding="utf-8")
 
@@ -102,7 +104,7 @@ def check_connection(ctx: Context) -> dict:
 def deploy_cluster(ctx: Context, network: str) -> dict:
     """
     Create cluster using kubespray.
-    Choose from one of this network plugin: cacilo, cilium, flannel.
+    Choose from one of this network plugin: calico, cilium, flannel.
     """
     ctx.info("Prepare to deploy cluster...")
 
@@ -189,7 +191,7 @@ def scale_up(master: int, worker: int, network: str) -> dict:
     }
 
 @mcp.tool(timeout=3600.0) 
-def scale_down(master: int, worker: int) -> dict:
+def remove_node(master: int, worker: int) -> dict:
     """
     Scale down cluster by remove master nodes using cluster.yml or worker nodes.
 
